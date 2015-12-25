@@ -104,3 +104,7 @@ func (s *Storage) FinishUpload(up upload.Upload) error {
 
 	return nil
 }
+
+func (s *Storage) DownloadACI(n string) (io.ReadSeeker, error) {
+	return os.Open(path.Join(s.directory, n))
+}
