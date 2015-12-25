@@ -1,7 +1,7 @@
 package aws_test
 
 import (
-	"github.com/upfluence/goamz/aws"
+	"github.com/appc/acserver/Godeps/_workspace/src/github.com/upfluence/goamz/aws"
 	. "github.com/motain/gocheck"
 	"io/ioutil"
 	"os"

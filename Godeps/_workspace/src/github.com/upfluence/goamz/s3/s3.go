@@ -16,7 +16,7 @@ import (
 	"encoding/base64"
 	"encoding/xml"
 	"fmt"
-	"github.com/upfluence/goamz/aws"
+	"github.com/appc/acserver/Godeps/_workspace/src/github.com/upfluence/goamz/aws"
 	"io"
 	"io/ioutil"
 	"log"

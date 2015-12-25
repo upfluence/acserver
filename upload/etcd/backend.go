@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"strconv"
 
+	"github.com/appc/acserver/Godeps/_workspace/src/github.com/coreos/etcd/client"
+	"github.com/appc/acserver/Godeps/_workspace/src/golang.org/x/net/context"
 	"github.com/appc/acserver/upload"
-	"github.com/coreos/etcd/Godeps/_workspace/src/golang.org/x/net/context"
-	"github.com/coreos/etcd/client"
 )
 
 type Backend struct {

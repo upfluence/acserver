@@ -8,10 +8,10 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/upfluence/goamz/aws"
-	"github.com/upfluence/goamz/s3"
-	"github.com/upfluence/goamz/testutil"
+	"github.com/appc/acserver/Godeps/_workspace/src/github.com/upfluence/goamz/aws"
+	"github.com/appc/acserver/Godeps/_workspace/src/github.com/upfluence/goamz/s3"
 	. "github.com/motain/gocheck"
+	"github.com/upfluence/goamz/testutil"
 	"net"
 	"sort"
 	"time"

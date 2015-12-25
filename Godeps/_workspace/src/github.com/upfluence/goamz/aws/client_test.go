@@ -2,7 +2,7 @@ package aws_test
 
 import (
 	"fmt"
-	"github.com/upfluence/goamz/aws"
+	"github.com/appc/acserver/Godeps/_workspace/src/github.com/upfluence/goamz/aws"
 	"io/ioutil"
 	"net/http"
 	"net/http/httptest"

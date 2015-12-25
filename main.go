@@ -25,15 +25,15 @@ import (
 	"path"
 	"strconv"
 
+	"github.com/appc/acserver/Godeps/_workspace/src/github.com/upfluence/goamz/aws"
 	"github.com/appc/acserver/aci"
 	"github.com/appc/acserver/storage"
 	"github.com/appc/acserver/storage/s3"
 	"github.com/appc/acserver/upload"
 	"github.com/appc/acserver/upload/etcd"
-	"github.com/upfluence/goamz/aws"
 
-	"github.com/codegangsta/negroni"
-	"github.com/gorilla/mux"
+	"github.com/appc/acserver/Godeps/_workspace/src/github.com/codegangsta/negroni"
+	"github.com/appc/acserver/Godeps/_workspace/src/github.com/gorilla/mux"
 )
 
 type initiateDetails struct {

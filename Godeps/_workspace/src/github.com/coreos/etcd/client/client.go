@@ -27,7 +27,7 @@ import (
 	"sync"
 	"time"
 
-	"golang.org/x/net/context"
+	"github.com/appc/acserver/Godeps/_workspace/src/golang.org/x/net/context"
 )
 
 var (

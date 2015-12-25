@@ -1,9 +1,9 @@
 package s3_test
 
 import (
-	"github.com/upfluence/goamz/aws"
-	"github.com/upfluence/goamz/s3"
-	"github.com/upfluence/goamz/s3/s3test"
+	"github.com/appc/acserver/Godeps/_workspace/src/github.com/upfluence/goamz/aws"
+	"github.com/appc/acserver/Godeps/_workspace/src/github.com/upfluence/goamz/s3"
+	"github.com/appc/acserver/Godeps/_workspace/src/github.com/upfluence/goamz/s3/s3test"
 	. "github.com/motain/gocheck"
 )
 

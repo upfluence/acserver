@@ -22,9 +22,9 @@ import (
 	"net/url"
 	"path"
 
-	"golang.org/x/net/context"
+	"github.com/appc/acserver/Godeps/_workspace/src/golang.org/x/net/context"
 
-	"github.com/coreos/etcd/pkg/types"
+	"github.com/appc/acserver/Godeps/_workspace/src/github.com/coreos/etcd/pkg/types"
 )
 
 var (
