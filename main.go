@@ -19,33 +19,22 @@ import (
 	"flag"
 	"fmt"
 	"html/template"
-	"io"
 	"io/ioutil"
 	"net/http"
 	"os"
 	"path"
 	"strconv"
-	"strings"
-	"sync"
-	"time"
 
-	"github.com/appc/acserver/Godeps/_workspace/src/github.com/codegangsta/negroni"
-	"github.com/appc/acserver/Godeps/_workspace/src/github.com/gorilla/mux"
-	"github.com/appc/acserver/Godeps/_workspace/src/github.com/nabeken/negroni-auth"
+	"github.com/appc/acserver/aci"
+	"github.com/appc/acserver/storage"
+	"github.com/appc/acserver/storage/s3"
+	"github.com/appc/acserver/upload"
+	"github.com/appc/acserver/upload/etcd"
+	"github.com/upfluence/goamz/aws"
+
+	"github.com/codegangsta/negroni"
+	"github.com/gorilla/mux"
 )
-
-type aci struct {
-	Name    string
-	Details []acidetails
-}
-
-type acidetails struct {
-	Version string
-	OS      string
-	Arch    string
-	Signed  bool
-	LastMod string
-}
 
 type initiateDetails struct {
 	ACIPushVersion string `json:"aci_push_version"`
@@ -62,14 +51,6 @@ type completeMsg struct {
 	ServerReason string `json:"server_reason,omitempty"`
 }
 
-type upload struct {
-	Started time.Time
-	Image   string
-	GotSig  bool
-	GotACI  bool
-	GotMan  bool
-}
-
 type handler struct {
 	Fn func(http.ResponseWriter, *http.Request)
 }
@@ -82,12 +63,8 @@ var (
 	serverName  string
 	directory   string
 	templatedir string
-	username    string
-	password    string
-
-	uploadcounter int
-	newuploadLock sync.Mutex
-	uploads       map[int]*upload
+	store       storage.Storage
+	backend     upload.Backend
 
 	gpgpubkey = flag.String("pubkeys", "",
 		"Path to gpg public keys images will be signed with")
@@ -99,7 +76,7 @@ var (
 func usage() {
 	fmt.Fprintf(os.Stderr, "Usage of %s:\n", os.Args[0])
 	fmt.Fprintf(os.Stderr,
-		"acserver SERVER_NAME ACI_DIRECTORY TEMPLATE_DIRECTORY USERNAME PASSWORD\n")
+		"acserver SERVER_NAME ACI_DIRECTORY TEMPLATE_DIRECTORY\n")
 	fmt.Fprintf(os.Stderr, "Flags:\n")
 	flag.PrintDefaults()
 }
@@ -109,7 +86,7 @@ func main() {
 	flag.Parse()
 	args := flag.Args()
 
-	if len(args) != 5 {
+	if len(args) != 3 {
 		usage()
 		return
 	}
@@ -132,41 +109,53 @@ func main() {
 	serverName = args[0]
 	directory = args[1]
 	templatedir = args[2]
-	username = args[3]
-	password = args[4]
+	auth, err := aws.EnvAuth()
 
-	os.RemoveAll(path.Join(directory, "tmp"))
-	err := os.MkdirAll(path.Join(directory, "tmp"), 0755)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%v", err)
 		return
 	}
 
-	uploads = make(map[int]*upload)
+	store, err = s3.NewStorage(auth, aws.USEast, "aci-repository")
 
-	authHandler := auth.Basic(username, password)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v", err)
+		return
+	}
+
+	backend, err = etcd.NewBackend([]string{"http://127.0.0.1:2379"}, "/acis")
+
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v", err)
+		return
+	}
+
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v", err)
+		return
+	}
 
 	r := mux.NewRouter()
 	r.HandleFunc("/", renderListOfACIs)
 	r.HandleFunc("/pubkeys.gpg", getPubkeys)
 
-	n0 := negroni.New(authHandler)
+	n0 := negroni.New()
 	n0.UseHandler(handler{initiateUpload})
 	r.Handle("/{image}/startupload", n0)
 
-	n1 := negroni.New(authHandler)
+	n1 := negroni.New()
 	n1.UseHandler(handler{uploadManifest})
 	r.Handle("/manifest/{num}", n1)
 
-	n2 := negroni.New(authHandler)
-	n2.UseHandler(handler{receiveUpload(tmpSigPath, gotSig)})
+	n2 := negroni.New()
+	n2.UseHandler(handler{uploadASC})
 	r.Handle("/signature/{num}", n2)
 
-	n3 := negroni.New(authHandler)
-	n3.UseHandler(handler{receiveUpload(tmpACIPath, gotACI)})
+	n3 := negroni.New()
+	n3.UseHandler(handler{uploadACI})
 	r.Handle("/aci/{num}", n3)
 
-	n4 := negroni.New(authHandler)
+	n4 := negroni.New()
 	n4.UseHandler(handler{completeUpload})
 	r.Handle("/complete/{num}", n4)
 
@@ -190,7 +179,7 @@ func renderListOfACIs(w http.ResponseWriter, req *http.Request) {
 		fmt.Fprintf(w, fmt.Sprintf("%v", err))
 		return
 	}
-	acis, err := listACIs()
+	acis, err := store.ListACIs()
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		fmt.Fprintf(w, fmt.Sprintf("%v", err))
@@ -198,7 +187,7 @@ func renderListOfACIs(w http.ResponseWriter, req *http.Request) {
 	}
 	err = t.Execute(w, struct {
 		ServerName string
-		ACIs       []aci
+		ACIs       []aci.Aci
 		HTTPS      bool
 	}{
 		ServerName: serverName,
@@ -218,18 +207,20 @@ func getPubkeys(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	if *gpgpubkey == "" {
-		w.WriteHeader(http.StatusNotFound)
-		return
-	}
-	file, err := os.Open(*gpgpubkey)
+	gpgKey, err := store.GetGPGPubKey()
+
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error opening gpg public key: %v", err)
-		w.WriteHeader(http.StatusInternalServerError)
-		return
+		if err == storage.ErrGPGPubKeyNotProvided {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		} else {
+			fmt.Fprintf(os.Stderr, "error opening gpg public key: %v", err)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
 	}
-	defer file.Close()
-	_, err = io.Copy(w, file)
+
+	_, err = w.Write(gpgKey)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error reading gpg public key: %v", err)
 		w.WriteHeader(http.StatusInternalServerError)
@@ -249,7 +240,12 @@ func initiateUpload(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	uploadNum := strconv.Itoa(newUpload(image))
+	uploadNum, err := newUpload(image)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprintf(os.Stderr, fmt.Sprintf("%v", err))
+		return
+	}
 
 	var prefix string
 	if *https {
@@ -261,13 +257,14 @@ func initiateUpload(w http.ResponseWriter, req *http.Request) {
 	deets := initiateDetails{
 		ACIPushVersion: "0.0.1",
 		Multipart:      false,
-		ManifestURL:    prefix + "/manifest/" + uploadNum,
-		SignatureURL:   prefix + "/signature/" + uploadNum,
-		ACIURL:         prefix + "/aci/" + uploadNum,
-		CompletedURL:   prefix + "/complete/" + uploadNum,
+		ManifestURL:    fmt.Sprintf("%s/manifest/%d", prefix, uploadNum),
+		SignatureURL:   fmt.Sprintf("%s/signature/%d", prefix, uploadNum),
+		ACIURL:         fmt.Sprintf("%s/aci/%d", prefix, uploadNum),
+		CompletedURL:   fmt.Sprintf("%s/complete/%d", prefix, uploadNum),
 	}
 
 	blob, err := json.Marshal(deets)
+	fmt.Printf("blob: %s\n", blob)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		fmt.Fprintf(os.Stderr, fmt.Sprintf("%v", err))
@@ -281,6 +278,88 @@ func initiateUpload(w http.ResponseWriter, req *http.Request) {
 	}
 }
 
+func uploadASC(w http.ResponseWriter, req *http.Request) {
+	if req.Method != "PUT" {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+
+	numInt, err := strconv.Atoi(mux.Vars(req)["num"])
+
+	if err != nil {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+
+	num := uint64(numInt)
+
+	up := getUpload(num)
+
+	if up == nil {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+
+	err = store.UploadASC(*up, req.Body)
+
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error uploading json: %v", err)
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	err = gotSig(num)
+
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error uploading json: %v", err)
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+}
+
+func uploadACI(w http.ResponseWriter, req *http.Request) {
+	if req.Method != "PUT" {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+
+	numInt, err := strconv.Atoi(mux.Vars(req)["num"])
+
+	if err != nil {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+
+	num := uint64(numInt)
+
+	up := getUpload(num)
+
+	if up == nil {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+
+	err = store.UploadACI(*up, req.Body)
+
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error uploading json: %v", err)
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	err = gotACI(num)
+
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error uploading json: %v", err)
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+}
+
 func uploadManifest(w http.ResponseWriter, req *http.Request) {
 	if req.Method != "PUT" {
 		w.WriteHeader(http.StatusNotFound)
@@ -292,7 +371,7 @@ func uploadManifest(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	err = gotMan(num)
+	err = gotMan(uint64(num))
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		fmt.Fprintf(os.Stderr, "%v", err)
@@ -302,80 +381,19 @@ func uploadManifest(w http.ResponseWriter, req *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
-func receiveUpload(genDst func(int) string, marksuccess func(int) error) func(http.ResponseWriter, *http.Request) {
-	return func(w http.ResponseWriter, req *http.Request) {
-		if req.Method != "PUT" {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-		num, err := strconv.Atoi(mux.Vars(req)["num"])
-		if err != nil {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-
-		up := getUpload(num)
-		if up == nil {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-
-		_, err = os.Stat(up.Image)
-		if err == nil {
-			w.WriteHeader(http.StatusConflict)
-			w.Write([]byte("item already uploaded"))
-			return
-		} else if !os.IsNotExist(err) {
-			w.WriteHeader(http.StatusInternalServerError)
-			fmt.Fprintf(os.Stderr, "%v", err)
-			return
-		}
-
-		aci, err := os.OpenFile(genDst(num),
-			os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
-		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			fmt.Fprintf(os.Stderr, "%v", err)
-			return
-		}
-		defer aci.Close()
-
-		_, err = io.Copy(aci, req.Body)
-		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			fmt.Fprintf(os.Stderr, "%v", err)
-			return
-		}
-
-		err = marksuccess(num)
-		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			fmt.Fprintf(os.Stderr, "%v", err)
-			return
-		}
-
-		w.WriteHeader(http.StatusOK)
-	}
-}
-
-func tmpSigPath(num int) string {
-	return path.Join(directory, "tmp", strconv.Itoa(num)+".asc")
-}
-
-func tmpACIPath(num int) string {
-	return path.Join(directory, "tmp", strconv.Itoa(num))
-}
-
 func completeUpload(w http.ResponseWriter, req *http.Request) {
 	if req.Method != "POST" {
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
-	num, err := strconv.Atoi(mux.Vars(req)["num"])
+	numInt, err := strconv.Atoi(mux.Vars(req)["num"])
+
 	if err != nil {
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
+
+	num := uint64(numInt)
 
 	up := getUpload(num)
 	if up == nil {
@@ -445,7 +463,7 @@ func completeUpload(w http.ResponseWriter, req *http.Request) {
 	return
 }
 
-func reportFailure(num int, w http.ResponseWriter, msg, clientmsg string) error {
+func reportFailure(num uint64, w http.ResponseWriter, msg, clientmsg string) error {
 	err := abortUpload(num)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -472,176 +490,87 @@ func reportFailure(num int, w http.ResponseWriter, msg, clientmsg string) error 
 	return nil
 }
 
-func abortUpload(num int) error {
-	newuploadLock.Lock()
-	delete(uploads, num)
-	newuploadLock.Unlock()
+func abortUpload(num uint64) error {
+	u, err := backend.Get(num)
 
-	tmpaci := path.Join(directory, "tmp", strconv.Itoa(num))
-	_, err := os.Stat(tmpaci)
-	if err == nil {
-		err = os.Remove(tmpaci)
-		if err != nil {
-			return err
-		}
-	} else if !os.IsNotExist(err) {
-		return err
-	}
-
-	tmpsig := path.Join(directory, "tmp", strconv.Itoa(num)+".asc")
-	_, err = os.Stat(tmpsig)
-	if err == nil {
-		err = os.Remove(tmpsig)
-		if err != nil {
-			return err
-		}
-	} else if !os.IsNotExist(err) {
-		return err
-	}
-
-	return nil
-}
-
-func finishUpload(num int) error {
-	newuploadLock.Lock()
-	up, ok := uploads[num]
-	if ok {
-		delete(uploads, num)
-	}
-	newuploadLock.Unlock()
-	if !ok {
-		return fmt.Errorf("no such upload: %d", num)
-	}
-
-	err := os.Rename(path.Join(directory, "tmp", strconv.Itoa(num)),
-		path.Join(directory, up.Image))
 	if err != nil {
-		return err
-	}
-
-	err = os.Rename(path.Join(directory, "tmp", strconv.Itoa(num)+".asc"),
-		path.Join(directory, up.Image+".asc"))
-	if err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func newUpload(image string) int {
-	newuploadLock.Lock()
-	uploadcounter++
-	uploads[uploadcounter] = &upload{
-		Started: time.Now(),
-		Image:   image,
-	}
-	newuploadLock.Unlock()
-	return uploadcounter
-}
-
-func getUpload(num int) *upload {
-	var up *upload
-	newuploadLock.Lock()
-	up, ok := uploads[num]
-	newuploadLock.Unlock()
-	if !ok {
 		return nil
 	}
-	return up
-}
 
-func gotSig(num int) error {
-	newuploadLock.Lock()
-	_, ok := uploads[num]
-	if ok {
-		uploads[num].GotSig = true
-	}
-	newuploadLock.Unlock()
-	if !ok {
-		return fmt.Errorf("no such upload: %d", num)
-	}
-	return nil
-}
+	err = backend.Delete(u.ID)
 
-func gotACI(num int) error {
-	newuploadLock.Lock()
-	_, ok := uploads[num]
-	if ok {
-		uploads[num].GotACI = true
-	}
-	newuploadLock.Unlock()
-	if !ok {
-		return fmt.Errorf("no such upload: %d", num)
-	}
-	return nil
-}
-
-func gotMan(num int) error {
-	newuploadLock.Lock()
-	_, ok := uploads[num]
-	if ok {
-		uploads[num].GotMan = true
-	}
-	newuploadLock.Unlock()
-	if !ok {
-		return fmt.Errorf("no such upload: %d", num)
-	}
-	return nil
-}
-
-func listACIs() ([]aci, error) {
-	files, err := ioutil.ReadDir(directory)
 	if err != nil {
-		return nil, err
+		return nil
 	}
 
-	var acis []aci
-	for _, file := range files {
-		_, fname := path.Split(file.Name())
-		tokens := strings.Split(fname, "-")
-		if len(tokens) != 4 {
-			continue
-		}
+	return store.CancelUpload(*u)
+}
 
-		tokens1 := strings.Split(tokens[3], ".")
-		if len(tokens1) != 2 {
-			continue
-		}
+func finishUpload(num uint64) error {
+	u, err := backend.Get(num)
 
-		if tokens1[1] != "aci" {
-			continue
-		}
-
-		var signed bool
-
-		_, err := os.Stat(path.Join(directory, fname+".asc"))
-		if err == nil {
-			signed = true
-		} else if os.IsNotExist(err) {
-			signed = false
-		} else {
-			return nil, err
-		}
-
-		details := acidetails{
-			Version: tokens[1],
-			OS:      tokens[2],
-			Arch:    tokens1[0],
-			Signed:  signed,
-			LastMod: file.ModTime().Format("Mon Jan 2 15:04:05 -0700 MST 2006"),
-		}
-
-		// If the last ACI added to the list has the same name
-		if len(acis) > 0 && acis[len(acis)-1].Name == tokens[0] {
-			acis[len(acis)-1].Details = append(acis[len(acis)-1].Details,
-				details)
-		} else {
-			acis = append(acis, aci{
-				Name:    tokens[0],
-				Details: []acidetails{details},
-			})
-		}
+	if err != nil {
+		return nil
 	}
 
-	return acis, nil
+	err = backend.Delete(u.ID)
+
+	if err != nil {
+		return nil
+	}
+
+	return store.FinishUpload(*u)
+}
+
+func newUpload(image string) (uint64, error) {
+	u, err := backend.Create(image)
+
+	if err != nil {
+		fmt.Println(err.Error())
+		return 0, err
+	}
+
+	return u.ID, nil
+}
+
+func getUpload(num uint64) *upload.Upload {
+	if u, err := backend.Get(num); err == nil {
+		return u
+	} else {
+		return nil
+	}
+}
+
+func gotSig(num uint64) error {
+	u, err := backend.Get(num)
+
+	if err != nil {
+		return err
+	}
+
+	u.GotSig = true
+	return backend.Update(u)
+	return nil
+}
+
+func gotACI(num uint64) error {
+	u, err := backend.Get(num)
+
+	if err != nil {
+		return err
+	}
+
+	u.GotACI = true
+	return backend.Update(u)
+}
+
+func gotMan(num uint64) error {
+	u, err := backend.Get(num)
+
+	if err != nil {
+		return err
+	}
+
+	u.GotMan = true
+	return backend.Update(u)
 }
