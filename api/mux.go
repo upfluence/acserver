@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"path"
 	"strconv"
+	"time"
 
 	"github.com/appc/acserver/aci"
 	"github.com/appc/acserver/storage"
@@ -82,6 +83,7 @@ func NewServerMux(store storage.Storage, backend upload.Backend, templateDir, se
 			),
 		},
 		Handler{"/complete/{num}", mux.completeUpload},
+		Handler{"/{image}", mux.downloadACI},
 	} {
 		sm.HandleFunc(couple.path, couple.handler)
 	}
@@ -239,6 +241,25 @@ func (m *Mux) uploadData(uploadData func(*upload.Upload, io.Reader) error, updat
 
 		w.WriteHeader(http.StatusOK)
 	}
+}
+
+func (m *Mux) downloadACI(w http.ResponseWriter, req *http.Request) {
+	image := mux.Vars(req)["image"]
+
+	if req.Method != "GET" || image == "" {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+
+	rs, err := m.store.DownloadACI(image)
+
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprintf(w, fmt.Sprintf("%v", err))
+		return
+	}
+
+	http.ServeContent(w, req, image, time.Now(), rs)
 }
 
 func (m *Mux) completeUpload(w http.ResponseWriter, req *http.Request) {
