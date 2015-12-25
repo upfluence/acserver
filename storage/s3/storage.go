@@ -108,3 +108,13 @@ func (s *Storage) FinishUpload(up upload.Upload) error {
 
 	return s.deleteTemps(up)
 }
+
+func (s *Storage) DownloadACI(n string) (io.ReadSeeker, error) {
+	buf, err := s.Get(aciPath + n)
+
+	if err != nil {
+		return nil, err
+	}
+
+	return bytes.NewReader(buf), nil
+}
