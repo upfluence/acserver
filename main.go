@@ -20,13 +20,14 @@ import (
 	"net/http"
 	"os"
 
-	"github.com/appc/acserver/Godeps/_workspace/src/github.com/upfluence/goamz/aws"
-
 	"github.com/appc/acserver/api"
 	"github.com/appc/acserver/storage"
 	"github.com/appc/acserver/storage/s3"
 	"github.com/appc/acserver/upload"
 	"github.com/appc/acserver/upload/etcd"
+
+	"github.com/appc/acserver/Godeps/_workspace/src/github.com/gorilla/handlers"
+	"github.com/appc/acserver/Godeps/_workspace/src/github.com/upfluence/goamz/aws"
 )
 
 var (
@@ -106,5 +107,8 @@ func main() {
 	}
 
 	mux := api.NewServerMux(store, backend, templateDir, serverName, *https)
-	http.ListenAndServe(fmt.Sprintf(":%d", *port), mux)
+	http.ListenAndServe(
+		fmt.Sprintf(":%d", *port),
+		handlers.LoggingHandler(os.Stdout, mux),
+	)
 }
