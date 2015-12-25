@@ -15,6 +15,7 @@ var (
 type Storage interface {
 	GetGPGPubKey() ([]byte, error)
 	ListACIs() ([]aci.Aci, error)
+	DownloadACI(string) (io.ReadSeeker, error)
 	UploadACI(upload.Upload, io.Reader) error
 	UploadASC(upload.Upload, io.Reader) error
 	FinishUpload(upload.Upload) error
