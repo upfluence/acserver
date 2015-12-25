@@ -30,7 +30,17 @@ func NewBackend(endpoints []string, namespace string) (*Backend, error) {
 
 	kapi := client.NewKeysAPI(c)
 
-	kapi.Create(context.Background(), fmt.Sprintf("%s/counter", namespace), "0")
+	_, err = kapi.Create(
+		context.Background(),
+		fmt.Sprintf("%s/counter", namespace),
+		"0",
+	)
+
+	if err != nil {
+		if e, ok := err.(client.Error); !ok || e.Code != client.ErrorCodeNodeExist {
+			return nil, err
+		}
+	}
 
 	return &Backend{kapi, namespace}, nil
 }
